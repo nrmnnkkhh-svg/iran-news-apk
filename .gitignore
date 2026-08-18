@@ -1,0 +1,10 @@
+x_cookies_clone.txt
+news.json
+*.bak
+*.log
+server.pid
+__pycache__/
+patch_*.py
+repair.py
+write_app.py
+ui*.js
