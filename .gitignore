@@ -8,3 +8,4 @@ patch_*.py
 repair.py
 write_app.py
 ui*.js
+save_clone_cookie.sh
