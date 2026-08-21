@@ -25,15 +25,18 @@ jobs:
       - name: Fetch News
         env:
           X_COOKIES: ${{ secrets.X_COOKIES }}
+          X_COOKIES_CLONE: ${{ secrets.X_COOKIES_CLONE }}
         run: |
-          echo "$X_COOKIES" > x_cookies_clone.txt
+          if [ -n "$X_COOKIES_CLONE" ]; then echo "$X_COOKIES_CLONE" > x_cookies_clone.txt; else echo "$X_COOKIES" > x_cookies_clone.txt; fi
           python fetch_news.py
+          mkdir -p docs
+          cp news.json docs/news.json
 
       - name: Commit and push changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add news.json
+          git add news.json docs/news.json || true
           git diff --staged --quiet || git commit -m "Update news.json"
           git stash --include-untracked || true
           git pull --rebase origin main
