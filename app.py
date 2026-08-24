@@ -15,7 +15,9 @@ def load_news():
         with open(NEWS_FILE, encoding="utf-8") as f:
             data = json.load(f)
             return data if isinstance(data, list) else []
-    except Exception: return []
+    except Exception as e:
+        print("news.json load error:", e)
+        return []
 
 PAGE = """<!doctype html>
 <html lang="fa" dir="rtl">

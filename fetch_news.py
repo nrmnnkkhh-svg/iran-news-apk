@@ -177,6 +177,10 @@ async def main():
                 "text": text,
             })
 
+        new_items = [i for i in new_items if str(i.get("tweet_id", "")).strip()]
+        if reset and len(new_items) < 10:
+            print("Reset fetch suspiciously small, aborting to avoid data loss.")
+            sys.exit(1)
         old_items = [] if reset else load_existing_news()
         merged = merge_news(old_items, new_items)
 
