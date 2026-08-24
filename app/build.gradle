@@ -1,0 +1,14 @@
+apply plugin: 'com.android.application'
+android {
+    namespace 'ir.news.app'
+    compileSdk 34
+    defaultConfig {
+        applicationId "ir.news.app"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+}
+dependencies {
+}
