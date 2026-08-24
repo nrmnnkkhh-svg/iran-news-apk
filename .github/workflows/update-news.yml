@@ -4,6 +4,8 @@ on:
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
+  repository_dispatch:
+    types: [fetch-news]
 
 concurrency:
   group: news-fetch
