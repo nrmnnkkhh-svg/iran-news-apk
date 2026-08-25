@@ -5,10 +5,9 @@ import difflib
 from datetime import datetime, timezone
 from pathlib import Path
 
-from twscrape import API
+from twikit import Client
 
 TARGET_USER = "IranIntlBrk"
-BURNER_USERNAME = "NRMNDIDI"
 
 COOKIE_FILE = Path("x_cookies_clone.txt")
 NEWS_FILE = Path("news.json")
@@ -29,25 +28,29 @@ def read_cookie():
     return cookie
 
 
-def parse_date(tweet):
-    for attr in ("date", "created_at", "timestamp"):
-        value = getattr(tweet, attr, None)
-        if value is None:
-            continue
+def parse_cookies(cookie_string: str) -> dict:
+    cookies = {}
+    for part in cookie_string.split(";"):
+        if "=" in part:
+            k, v = part.strip().split("=", 1)
+            cookies[k] = v
+    return cookies
 
-        if isinstance(value, datetime):
-            if value.tzinfo is None:
-                value = value.replace(tzinfo=timezone.utc)
-            return value.astimezone(timezone.utc).isoformat()
 
+def is_similar(text1: str, text2: str, threshold: float = 0.75) -> bool:
+    if not text1 or not text2:
+        return False
+    return difflib.SequenceMatcher(None, text1, text2).ratio() >= threshold
+
+
+def parse_date(tweet_result):
+    legacy = tweet_result.get("legacy", {})
+    created_at = legacy.get("created_at", "")
+    if created_at:
         try:
-            ts = float(value)
-            if ts > 1_000_000_000_000:
-                ts = ts / 1000
-            return datetime.fromtimestamp(ts, timezone.utc).isoformat()
+            return datetime.fromisoformat(created_at.replace("Z", "+00:00")).isoformat()
         except Exception:
             pass
-
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -61,21 +64,12 @@ def load_existing_news():
         return []
 
 
-def is_similar(text1: str, text2: str, threshold: float = 0.75) -> bool:
-    if not text1 or not text2:
-        return False
-    return difflib.SequenceMatcher(None, text1, text2).ratio() >= threshold
-
-
 def merge_news(old_items, new_items):
     conv_map = {}
     for item in old_items:
         cid = item.get("conversation_id")
         if cid:
             conv_map.setdefault(cid, []).append(item)
-
-    for cid in conv_map:
-        conv_map[cid].sort(key=lambda x: (x.get("created_at", ""), int(x.get("tweet_id", "0") or 0)))
 
     final_items = []
     seen_ids = set()
@@ -93,14 +87,11 @@ def merge_news(old_items, new_items):
 
         cid = new_item.get("conversation_id")
 
-        # Similarity dedup: check if it's an edit/repost of the last tweet in the thread
         if cid and cid in conv_map and conv_map[cid]:
             last_old_item = conv_map[cid][-1]
             old_text = last_old_item.get("text", "")
             new_text = new_item.get("text", "")
-
             if is_similar(old_text, new_text):
-                # Replace the old item's data with the new one
                 for i, item in enumerate(final_items):
                     if str(item.get("tweet_id", "")) == str(last_old_item.get("tweet_id", "")):
                         final_items[i]["text"] = new_text
@@ -131,72 +122,101 @@ async def main():
     reset = "--reset" in sys.argv
 
     cookie = read_cookie()
-    api = API()
+    cookies = parse_cookies(cookie)
 
-    try:
-        await api.pool.add_account_cookies(BURNER_USERNAME, cookie)
-    except Exception as exc:
-        print(f"Could not load clone cookies: {exc}")
+    client = Client(language="en-US")
+    client.set_cookies(cookies)
+
+    # Bypass broken x-client-transaction-id init
+    async def noop_transaction_init(http, ct_headers):
+        print("Bypassing x-client-transaction-id init")
+        return
+
+    def fake_generate_transaction_id(method="GET", path="/"):
+        return "00000000000000000000000000000000"
+
+    client.client_transaction.init = noop_transaction_init
+    client.client_transaction.generate_transaction_id = fake_generate_transaction_id
+    if not hasattr(client.client_transaction, "key"):
+        try:
+            client.client_transaction.key = ""
+        except Exception:
+            pass
+
+    # Raw user lookup
+    raw_user_response, _ = await client.gql.user_by_screen_name(TARGET_USER)
+    user_data = raw_user_response.get("data", {}).get("user", {}).get("result", {})
+    user_id = (
+        user_data.get("rest_id")
+        or user_data.get("id_str")
+        or str(user_data.get("id", ""))
+    )
+    if not user_id:
+        print(f"Could not find user ID: {json.dumps(raw_user_response)[:300]}")
         sys.exit(1)
 
-    try:
-        account = await api.pool.get_account(BURNER_USERNAME)
-        if account is None or not account.active:
-            print("Clone account is not active.")
-            sys.exit(1)
+    print(f"User ID: {user_id}")
 
-        user = await api.user_by_login(TARGET_USER)
-        user_id = user.id
+    # Raw tweets fetch
+    raw_tweets_response, _ = await client.gql.user_tweets(user_id, cursor=None, count=FETCH_LIMIT)
 
-        tweets = []
-        seen = set()
-        async for tweet in api.user_tweets(user_id, limit=FETCH_LIMIT):
-            if tweet.id in seen:
+    tweets = []
+    instructions = (
+        raw_tweets_response.get("data", {})
+        .get("user", {})
+        .get("result", {})
+        .get("timeline_v2", {})
+        .get("timeline", {})
+        .get("instructions", [])
+    )
+
+    for instruction in instructions:
+        if instruction.get("type") != "TimelineAddEntries":
+            continue
+        for entry in instruction.get("entries", []):
+            tweet_result = (
+                entry.get("content", {})
+                .get("itemContent", {})
+                .get("tweet_results", {})
+                .get("result", {})
+            )
+            if not tweet_result:
                 continue
-            seen.add(tweet.id)
-            tweets.append(tweet)
-            if len(tweets) >= FETCH_LIMIT:
-                break
+            tid = tweet_result.get("rest_id")
+            legacy = tweet_result.get("legacy", {})
+            text = legacy.get("full_text", "")
+            conversation_id = str(legacy.get("conversation_id_str") or tid)
 
-        if not tweets:
-            print("No tweets were fetched.")
-            sys.exit(1)
+            if tid and text:
+                tweets.append({
+                    "tweet_id": str(tid),
+                    "conversation_id": conversation_id,
+                    "created_at": parse_date(tweet_result),
+                    "tag": "",
+                    "text": text,
+                })
 
-        new_items = []
-        for tweet in tweets:
-            text = (getattr(tweet, "rawContent", "") or "").strip()
-            if not text:
-                continue
-
-            conversation_id = str(getattr(tweet, "conversationId", "") or tweet.id)
-            new_items.append({
-                "tweet_id": str(tweet.id),
-                "conversation_id": conversation_id,
-                "created_at": parse_date(tweet),
-                "tag": "",
-                "text": text,
-            })
-
-        new_items = [i for i in new_items if str(i.get("tweet_id", "")).strip()]
-        if reset and len(new_items) < 10:
-            print("Reset fetch suspiciously small, aborting to avoid data loss.")
-            sys.exit(1)
-        old_items = [] if reset else load_existing_news()
-        merged = merge_news(old_items, new_items)
-
-        temp_file = NEWS_FILE.with_suffix(".json.tmp")
-        temp_file.write_text(
-            json.dumps(merged, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
-        temp_file.replace(NEWS_FILE)
-
-        print(f"Fetched {len(new_items)} tweets.")
-        print(f"news.json now contains {len(merged)} items (duplicates merged).")
-
-    except Exception as exc:
-        print(f"Fetch failed: {exc}")
+    if not tweets:
+        print("No tweets were fetched.")
         sys.exit(1)
+
+    new_items = [t for t in tweets if str(t.get("tweet_id", "")).strip()]
+    if reset and len(new_items) < 10:
+        print("Reset fetch suspiciously small, aborting to avoid data loss.")
+        sys.exit(1)
+
+    old_items = [] if reset else load_existing_news()
+    merged = merge_news(old_items, new_items)
+
+    temp_file = NEWS_FILE.with_suffix(".json.tmp")
+    temp_file.write_text(
+        json.dumps(merged, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+    temp_file.replace(NEWS_FILE)
+
+    print(f"Fetched {len(new_items)} tweets.")
+    print(f"news.json now contains {len(merged)} items (duplicates merged).")
 
 
 if __name__ == "__main__":
