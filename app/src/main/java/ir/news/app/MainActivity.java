@@ -23,14 +23,7 @@ public class MainActivity extends Activity {
         ws.setJavaScriptEnabled(true);
         ws.setDomStorageEnabled(true);
         ws.setAllowFileAccess(true);
-        webView.setWebViewClient(new WebViewClient() {
-            @Override
-            public void onPageFinished(WebView view, String url) {
-                int pad = getStatusBarHeight();
-                view.evaluateJavascript(
-                    "if (window.setStatusBarPad) window.setStatusBarPad(" + pad + ");", null);
-            }
-        });
+        webView.setWebViewClient(new WebViewClient());
         webView.addJavascriptInterface(new Bridge(), "AndroidBridge");
         webView.setBackgroundColor(Color.parseColor("#070b12"));
         webView.loadUrl("file:///android_asset/index.html");
